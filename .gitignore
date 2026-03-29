@@ -1,0 +1,48 @@
+# PlatformIO
+.pio/
+.vscode/
+.clang_complete
+.gcc-flags.json
+
+# Build artifacts
+*.o
+*.a
+*.lib
+*.so
+*.dylib
+*.exe
+*.out
+*.com
+*.class
+*.dll
+
+# Dependencies
+build/
+dist/
+node_modules/
+.env
+
+# IDE
+*.swp
+*.swo
+*~
+.DS_Store
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# Arduino specific
+*.hex
+*.elf
+.pioenvs/
+.piolibdeps/
+
+# Python
+*.pyc
+__pycache__/
+
+# Temp files
+*.tmp
+*.bak
+*.backup
