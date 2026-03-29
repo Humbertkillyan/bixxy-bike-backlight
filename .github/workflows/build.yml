@@ -1,0 +1,30 @@
+name: Arduino Compile Check
+
+on:
+  push:
+    branches: [ main, dev ]
+  pull_request:
+    branches: [ main, dev ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Set up PlatformIO
+      uses: platformio/setup-platformio-action@main
+    
+    - name: Install dependencies
+      run: |
+        pio pkg install
+    
+    - name: Build for Arduino Uno
+      run: pio run -e arduino_uno
+    
+    - name: Build for ESP32
+      run: pio run -e esp32
+    
+    - name: Run tests
+      run: pio test
