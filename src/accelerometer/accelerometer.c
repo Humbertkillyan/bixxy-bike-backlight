@@ -1,12 +1,9 @@
 /**
  * @file accelerometer.c
- * @brief Implémentation du module accéléromètre
+ * @brief Implémentation du module accéléromètre avec électroniccats MPU6050
  * 
- * Responsabilités:
- * - Communication I2C avec MPU-6050
- * - Configuration du capteur
- * - Calibration et conversion des données
- * - Application de filtres si nécessaire
+ * Utilise la bibliothèque electroniccats/MPU6050 pour communication I2C robuste
+ * - https://github.com/electroniccats/mpu6050
  */
 
 #include "accelerometer.h"
@@ -14,235 +11,187 @@
 #include "../utils/utils.h"
 #include <Wire.h>
 #include <math.h>
-
-// ============================================================================
-// CONSTANTES REGISTRES MPU-6050
-// ============================================================================
-
-#define MPU6050_ADDR            0x68
-#define MPU6050_ACCEL_XOUT_H    0x3B
-#define MPU6050_PWR_MGMT_1      0x6B
-#define MPU6050_CONFIG          0x1A
-#define MPU6050_ACCEL_CONFIG    0x1C
-
-// ============================================================================
-// TYPES PRIVÉS
-// ============================================================================
-
-typedef struct {
-    bool initialized;
-    accel_scale_t current_scale;
-    float scale_factor;
-    int16_t offset_x, offset_y, offset_z;
-    uint8_t error_count;
-} accel_state_t;
+#include <MPU6050.h>
 
 // ============================================================================
 // VARIABLES PRIVÉES
 // ============================================================================
 
-static accel_state_t accel_state = {0};
+static MPU6050 mpu;
+static bool is_initialized = false;
+static accel_data_t last_data = {0};
+static int16_t offset_x = 0, offset_y = 0, offset_z = 0;
+static float scale_factor = 1.0f / 16384.0f;  // Default for ±2g
 
 // ============================================================================
 // FONCTIONS PRIVÉES
 // ============================================================================
 
-static bool _write_register(uint8_t reg, uint8_t value);
-static bool _read_registers(uint8_t reg, uint8_t *buffer, uint8_t len);
-static void _update_scale_factor(accel_scale_t scale);
-static bool _self_test(void);
+/**
+ * @brief Mettre à jour le facteur d'échelle selon la plage configurée
+ */
+static void update_scale_factor(accel_scale_t scale) {
+    switch (scale) {
+        case ACCEL_SCALE_2G:   scale_factor = 1.0f / 16384.0f; break;
+        case ACCEL_SCALE_4G:   scale_factor = 1.0f / 8192.0f;  break;
+        case ACCEL_SCALE_8G:   scale_factor = 1.0f / 4096.0f;  break;
+        case ACCEL_SCALE_16G:  scale_factor = 1.0f / 2048.0f;  break;
+    }
+}
 
 // ============================================================================
 // INTERFACE PUBLIQUE
 // ============================================================================
 
 bool accelerometer_init(void) {
-    if (accel_state.initialized) {
+    if (is_initialized) {
         return true;
     }
     
-    utils_log("INFO", "Initializing Accelerometer (MPU-6050)");
+    utils_log("INFO", "Initializing MPU-6050 Accelerometer");
     
-    Wire.begin();
-    Wire.setClock(I2C_SPEED);
+    // Initialiser I2C
+    Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN, I2C_SPEED);
     
-    // Vérifier présence du capteur
-    Wire.beginTransmission(MPU6050_ADDR);
-    if (Wire.endTransmission() != 0) {
-        utils_log("ERROR", "MPU-6050 not found on I2C bus");
+    // Initialiser la bibliothèque MPU6050 à l'adresse configurée
+    mpu.initialize(MPU6050_I2C_ADDR);
+    
+    // Vérifier la connexion
+    if (!mpu.testConnection()) {
+        utils_log_int("ERROR", "MPU-6050 not responding at address", MPU6050_I2C_ADDR);
         return false;
     }
     
-    // Réveiller le capteur (sortie sleep mode)
-    if (!_write_register(MPU6050_PWR_MGMT_1, 0x00)) {
-        utils_log("ERROR", "Failed to wake MPU-6050");
-        return false;
-    }
+    utils_log("INFO", "MPU-6050 detected successfully");
     
-    delay(100);  // Attendre stabilisation
+    // Configuration initiale
+    mpu.setFullScaleAccelRange(MPU6050_ACCEL_FS_2);  // ±2g par défaut
+    mpu.setDLPFMode(MPU6050_DLPF_CFG);               // Low-pass filter
+    mpu.setSleepEnabled(false);
+    mpu.setClockSource(MPU6050_CLOCK_PLL_XGYRO);  // Horloge interne
     
-    // Configuration par défaut
-    if (!accelerometer_configure(ACCEL_SCALE_2G, ACCEL_RATE_50HZ)) {
-        return false;
-    }
-    
-    accel_state.initialized = true;
-    accel_state.error_count = 0;
-    memset(&accel_state.offset_x, 0, sizeof(int16_t) * 3);
+    is_initialized = true;
+    utils_log("INFO", "MPU-6050 initialization complete");
     
     return true;
 }
 
 bool accelerometer_configure(accel_scale_t scale, accel_sample_rate_t rate) {
-    if (!accel_state.initialized) {
+    if (!is_initialized) {
         return false;
     }
     
-    // Configurer l'échelle
-    uint8_t accel_config = (scale << 3);
-    if (!_write_register(MPU6050_ACCEL_CONFIG, accel_config)) {
-        return false;
+    // Configurer l'échelle d'accélération
+    uint8_t fs_range;
+    switch (scale) {
+        case ACCEL_SCALE_2G:   fs_range = MPU6050_ACCEL_FS_2;   break;
+        case ACCEL_SCALE_4G:   fs_range = MPU6050_ACCEL_FS_4;   break;
+        case ACCEL_SCALE_8G:   fs_range = MPU6050_ACCEL_FS_8;   break;
+        case ACCEL_SCALE_16G:  fs_range = MPU6050_ACCEL_FS_16;  break;
+        default:               fs_range = MPU6050_ACCEL_FS_2;   break;
     }
     
-    _update_scale_factor(scale);
-    accel_state.current_scale = scale;
+    mpu.setFullScaleAccelRange(fs_range);
+    update_scale_factor(scale);
     
+    // Configurer la fréquence d'échantillonnage (SMPLRT_DIV = 1000 / (1 + divider) Hz)
+    uint8_t divider;
+    switch (rate) {
+        case ACCEL_RATE_10HZ:   divider = 99;   break;   // ~10 Hz
+        case ACCEL_RATE_50HZ:   divider = 19;   break;   // ~50 Hz
+        case ACCEL_RATE_100HZ:  divider = 9;    break;   // ~100 Hz
+        case ACCEL_RATE_200HZ:  divider = 4;    break;   // ~200 Hz
+        default:                divider = 19;   break;
+    }
+    
+    mpu.setRate(divider);
+    
+    utils_log("INFO", "Accelerometer configured");
     return true;
 }
 
 bool accelerometer_read(accel_data_t *data) {
-    if (!accel_state.initialized || !data) {
+    if (!is_initialized || !data) {
         return false;
     }
     
-    // Lire les 6 registres accélération (3 axes × 2 bytes)
-    uint8_t buffer[6];
-    if (!_read_registers(MPU6050_ACCEL_XOUT_H, buffer, 6)) {
-        accel_state.error_count++;
-        return false;
-    }
+    int16_t ax, ay, az;
+    mpu.getAcceleration(&ax, &ay, &az);
     
-    // Combiner high et low bytes
-    data->x_raw = ((int16_t)buffer[0] << 8) | buffer[1];
-    data->y_raw = ((int16_t)buffer[2] << 8) | buffer[3];
-    data->z_raw = ((int16_t)buffer[4] << 8) | buffer[5];
+    // Appliquer les offsets de calibration
+    ax -= offset_x;
+    ay -= offset_y;
+    az -= offset_z;
     
-    // Appliquer offset calibration
-    data->x_raw -= accel_state.offset_x;
-    data->y_raw -= accel_state.offset_y;
-    data->z_raw -= accel_state.offset_z;
+    // Stocker valeurs brutes et converties
+    data->x_raw = ax;
+    data->y_raw = ay;
+    data->z_raw = az;
     
-    // Convertir en g
-    data->x = (float)data->x_raw * accel_state.scale_factor;
-    data->y = (float)data->y_raw * accel_state.scale_factor;
-    data->z = (float)data->z_raw * accel_state.scale_factor;
+    data->x = ax * scale_factor;
+    data->y = ay * scale_factor;
+    data->z = az * scale_factor;
     
-    // Calculer magnitude
-    data->magnitude = sqrt(data->x * data->x + 
-                          data->y * data->y + 
-                          data->z * data->z);
+    // Calculer la magnitude
+    data->magnitude = sqrtf(
+        data->x * data->x +
+        data->y * data->y +
+        data->z * data->z
+    );
     
-    data->timestamp = millis();
-    accel_state.error_count = 0;
+    data->timestamp = utils_millis();
+    last_data = *data;
     
     return true;
 }
 
 bool accelerometer_calibrate(void) {
-    if (!accel_state.initialized) {
+    if (!is_initialized) {
         return false;
     }
     
-    utils_log("INFO", "Calibrating accelerometer (keep level)");
+    utils_log("INFO", "Starting calibration - keep device level");
     
     int32_t sum_x = 0, sum_y = 0, sum_z = 0;
-    const int16_t samples = 50;
-    uint8_t buffer[6];
+    const int16_t num_samples = 100;
+    const uint32_t sample_delay_ms = 50;
     
-    uint32_t deadline = millis() + 5000;  // 5 secondes max
+    utils_log_int("INFO", "Taking samples", num_samples);
     
-    for (int16_t i = 0; i < samples && millis() < deadline; i++) {
-        if (!_read_registers(MPU6050_ACCEL_XOUT_H, buffer, 6)) {
-            continue;
-        }
+    // Collecter les échantillons
+    for (int16_t i = 0; i < num_samples; i++) {
+        int16_t ax, ay, az;
+        mpu.getAcceleration(&ax, &ay, &az);
         
-        sum_x += ((int16_t)buffer[0] << 8) | buffer[1];
-        sum_y += ((int16_t)buffer[2] << 8) | buffer[3];
-        sum_z += ((int16_t)buffer[4] << 8) | buffer[5];
+        sum_x += ax;
+        sum_y += ay;
+        sum_z += az;
         
-        delay(50);
+        utils_delay(sample_delay_ms);
     }
     
-    if (millis() >= deadline) {
-        utils_log("WARN", "Calibration timeout");
-        return false;
-    }
+    // Calculer les offsets
+    // Le capteur doit lire environ (0, 0, 1g) si placé à plat
+    offset_x = sum_x / num_samples;
+    offset_y = sum_y / num_samples;
+    offset_z = (sum_z / num_samples) - (int16_t)(1.0f / scale_factor);  // Soustraire 1g
     
-    // Le capteur devrait lire (0,0,g) en conditions nominales
-    accel_state.offset_x = sum_x / samples;
-    accel_state.offset_y = sum_y / samples;
-    accel_state.offset_z = (sum_z / samples) - 16384;  // 16384 LSB/g pour ±2g
+    utils_log_int("INFO", "Offset X", offset_x);
+    utils_log_int("INFO", "Offset Y", offset_y);
+    utils_log_int("INFO", "Offset Z", offset_z);
     
-    utils_log("INFO", "Calibration complete");
+    utils_log("INFO", "Calibration complete!");
     return true;
 }
 
 bool accelerometer_is_moving(float threshold) {
-    accel_data_t data;
-    if (!accelerometer_read(&data)) {
-        return false;
-    }
-    return data.magnitude > threshold;
+    return last_data.magnitude > threshold;
 }
 
 void accelerometer_deinit(void) {
-    if (accel_state.initialized) {
-        utils_log("INFO", "Stopping accelerometer");
+    if (is_initialized) {
+        mpu.setSleepEnabled(true);
+        is_initialized = false;
+        utils_log("INFO", "Accelerometer deinitialized");
     }
-    accel_state.initialized = false;
-}
-
-// ============================================================================
-// FONCTIONS PRIVÉES
-// ============================================================================
-
-static bool _write_register(uint8_t reg, uint8_t value) {
-    Wire.beginTransmission(MPU6050_ADDR);
-    Wire.write(reg);
-    Wire.write(value);
-    return Wire.endTransmission() == 0;
-}
-
-static bool _read_registers(uint8_t reg, uint8_t *buffer, uint8_t len) {
-    Wire.beginTransmission(MPU6050_ADDR);
-    Wire.write(reg);
-    if (Wire.endTransmission() != 0) {
-        return false;
-    }
-    
-    Wire.requestFrom(MPU6050_ADDR, len);
-    if (Wire.available() != len) {
-        return false;
-    }
-    
-    for (uint8_t i = 0; i < len; i++) {
-        buffer[i] = Wire.read();
-    }
-    
-    return true;
-}
-
-static void _update_scale_factor(accel_scale_t scale) {
-    // Conversion: LSB to g selon la plage
-    switch (scale) {
-        case ACCEL_SCALE_2G:   accel_state.scale_factor = 1.0f / 16384.0f; break;
-        case ACCEL_SCALE_4G:   accel_state.scale_factor = 1.0f / 8192.0f;  break;
-        case ACCEL_SCALE_8G:   accel_state.scale_factor = 1.0f / 4096.0f;  break;
-        case ACCEL_SCALE_16G:  accel_state.scale_factor = 1.0f / 2048.0f;  break;
-    }
-}
-
-static bool _self_test(void) {
-    // TODO: Implémenter self-test MPU-6050
-    return true;
 }

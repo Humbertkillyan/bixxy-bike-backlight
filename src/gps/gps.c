@@ -1,157 +1,117 @@
 /**
  * @file gps.c
- * @brief Implémentation du module GPS
- * 
- * Responsabilités:
- * - Communication UART avec module GPS
- * - Parsing des sentences NMEA
- * - Validation et mise en cache des données
+ * @brief Implémentation du module GPS avec TinyGPSPlus
+ * @details Parsing NMEA pour Beitian 220T via UART1
+ * - Bibliothèque: TinyGPSPlus
+ * - Module: Beitian 220T (9600 baud NMEA)
  */
 
 #include "gps.h"
 #include "../config.h"
 #include "../utils/utils.h"
 #include <string.h>
-
-// ============================================================================
-// CONSTANTES
-// ============================================================================
-
-#define GPS_BUFFER_SIZE         128
-#define GPS_MAX_SENTENCE_LEN    82
-#define GPS_PARSER_TIMEOUT_MS   2000
-
-// ============================================================================
-// TYPES PRIVÉS
-// ============================================================================
-
-typedef struct {
-    bool initialized;
-    bool has_fix;
-    uint32_t last_read;
-    uint8_t error_count;
-    
-    // Buffer de parsing
-    char rx_buffer[GPS_BUFFER_SIZE];
-    uint16_t rx_index;
-} gps_state_t;
+#include <TinyGPS++.h>
 
 // ============================================================================
 // VARIABLES PRIVÉES
 // ============================================================================
 
-static gps_state_t gps_state = {0};
-static gps_data_t gps_cache = {0};
+static TinyGPSPlus gps_parser;
+static bool is_initialized = false;
+static gps_data_t latest_data = {0};
+static uint32_t last_update = 0;
+static uint32_t last_location_update = 0;
+static uint8_t chars_processed = 0;
+static uint8_t failed_checksums = 0;
 
-// ============================================================================
-// FONCTIONS PRIVÉES
-// ============================================================================
-
-static bool _parse_nmea_sentence(const char *sentence, gps_data_t *data);
-static bool _parse_rmc_sentence(const char *sentence, gps_data_t *data);
-static bool _parse_gga_sentence(const char *sentence, gps_data_t *data);
-static void _process_uart_data(void);
-static bool _is_valid_sentence(const char *sentence);
+// Sélectionner le bon port UART selon la plateforme
+#ifdef PLATFORM_ESP32_NANO
+    #define GPS_SERIAL Serial1  // UART1 pour Beitian 220T
+#else
+    #define GPS_SERIAL Serial   // Port série principal
+#endif
 
 // ============================================================================
 // INTERFACE PUBLIQUE
 // ============================================================================
 
 bool gps_init(void) {
-    if (gps_state.initialized) {
+    if (is_initialized) {
         return true;
     }
     
-    utils_log("INFO", "Initializing GPS module");
+    utils_log("INFO", "Initializing Beitian 220T GPS module");
     
-    // Configurer UART pour GPS
-    #if defined(PLATFORM_ESP32)
-        Serial2.begin(GPS_BAUD_RATE, SERIAL_8N1, GPS_RX_PIN, GPS_TX_PIN);
-    #else
-        Serial.begin(GPS_BAUD_RATE);  // Sur Uno/Mega, mapping dans Arduino
-    #endif
+    // Configurer le port UART pour GPS
+    GPS_SERIAL.begin(GPS_BAUD_RATE, SERIAL_8N1, GPS_RX_PIN, GPS_TX_PIN);
     
-    memset(&gps_state, 0, sizeof(gps_state));
-    memset(&gps_cache, 0, sizeof(gps_cache));
+    if (!GPS_SERIAL) {
+        utils_log("ERROR", "Failed to initialize GPS UART");
+        return false;
+    }
     
-    gps_state.initialized = true;
-    gps_state.rx_index = 0;
+    is_initialized = true;
+    last_update = utils_millis();
     
+    utils_log("INFO", "Beitian 220T GPS initialized (9600 baud)");
     return true;
 }
 
 bool gps_read(gps_data_t *data) {
-    if (!gps_state.initialized || !data) {
+    if (!is_initialized || !data) {
         return false;
     }
     
-    // Lire les données disponibles
-    _process_uart_data();
+    // Traiter les données disponibles sur UART
+    while (GPS_SERIAL.available() > 0) {
+        char c = GPS_SERIAL.read();
+        if (gps_parser.encode(c)) {
+            // Une phrase complète a été parsée
+            chars_processed++;
+            
+            // Mise à jour des données si nouvelle localisation
+            if (gps_parser.location.isUpdated()) {
+                last_location_update = utils_millis();
+                
+                latest_data.latitude = gps_parser.location.lat();
+                latest_data.longitude = gps_parser.location.lng();
+                latest_data.altitude = gps_parser.altitude.meters();
+                latest_data.speed = gps_parser.speed.kmph();
+                latest_data.course = gps_parser.course.deg();
+                latest_data.satellites = gps_parser.satellites.value();
+                latest_data.hdop = gps_parser.hdop.value();
+                latest_data.has_fix = gps_parser.location.isValid();
+                latest_data.timestamp = utils_millis();
+            }
+        }
+    }
     
-    // Copier les données en cache
-    *data = gps_cache;
+    // Copier les données mises en cache
+    *data = latest_data;
     
-    return gps_state.has_fix;
+    // Retourner vrai si on a une fix valide
+    return gps_parser.location.isValid() && gps_parser.location.age() < 2000;
 }
 
 bool gps_is_ready(void) {
-    return gps_state.initialized && gps_state.has_fix;
+    if (!is_initialized) {
+        return false;
+    }
+    
+    // Check if fix is valid and not too old
+    return gps_parser.location.isValid() && 
+           (utils_millis() - last_location_update) < GPS_TIMEOUT_MS;
 }
 
 uint8_t gps_get_satellites(void) {
-    return gps_cache.satellites;
+    return gps_parser.satellites.value();
 }
 
 void gps_deinit(void) {
-    if (gps_state.initialized) {
-        utils_log("INFO", "Stopping GPS module");
+    if (is_initialized) {
+        GPS_SERIAL.end();
+        is_initialized = false;
+        utils_log("INFO", "GPS module stopped");
     }
-    gps_state.initialized = false;
 }
 
-// ============================================================================
-// FONCTIONS PRIVÉES
-// ============================================================================
-
-static void _process_uart_data(void) {
-    // Simple implementation - à améliorer selon besoin
-    // En production, utiliser interrupt-driven UART
-}
-
-static bool _parse_nmea_sentence(const char *sentence, gps_data_t *data) {
-    if (!sentence || !data || !_is_valid_sentence(sentence)) {
-        return false;
-    }
-    
-    // Dispatcher selon le type de sentence
-    if (strstr(sentence, "$GPRMC") || strstr(sentence, "$GNRMC")) {
-        return _parse_rmc_sentence(sentence, data);
-    } else if (strstr(sentence, "$GPGGA") || strstr(sentence, "$GNGGA")) {
-        return _parse_gga_sentence(sentence, data);
-    }
-    
-    return false;
-}
-
-static bool _parse_rmc_sentence(const char *sentence, gps_data_t *data) {
-    // TODO: Implémenter parsing NMEA RMC
-    // Format: $GPRMC,time,status,lat,N/S,lon,E/W,speed,course,date,mv,E/W
-    return false;
-}
-
-static bool _parse_gga_sentence(const char *sentence, gps_data_t *data) {
-    // TODO: Implémenter parsing NMEA GGA
-    // Format: $GPGGA,time,lat,N/S,lon,E/W,fix,sats,hdop,alt,M,geoid,M
-    return false;
-}
-
-static bool _is_valid_sentence(const char *sentence) {
-    if (!sentence || strlen(sentence) < 10) {
-        return false;
-    }
-    
-    // Vérifier checksum NMEA si présent
-    // Format: $....*HH où HH est CheckSum
-    
-    return true;  // TODO: Implémenter validation complète
-}

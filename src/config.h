@@ -16,9 +16,9 @@
 // SÉLECTION DE LA PLATEFORME
 // ============================================================================
 
-#define PLATFORM_ARDUINO_UNO    1
-// #define PLATFORM_ARDUINO_MEGA 0
-// #define PLATFORM_ESP32        0
+// #define PLATFORM_ARDUINO_UNO    0
+// #define PLATFORM_ARDUINO_MEGA   0
+#define PLATFORM_ESP32_NANO     1  // ESP32 Nano (BIXXY project)
 
 // ============================================================================
 // PIN DEFINITIONS - ARDUINO UNO
@@ -70,26 +70,38 @@
     #define STATUS_LED_PIN          13
 
 // ============================================================================
-// PIN DEFINITIONS - ESP32
+// PIN DEFINITIONS - ESP32 NANO
 // ============================================================================
 
-#elif defined(PLATFORM_ESP32)
-    #define GPS_RX_PIN              16  // UART2 RX
-    #define GPS_TX_PIN              17  // UART2 TX
+#elif defined(PLATFORM_ESP32_NANO)
+    // GPS Module (UART1: Hardware Serial)
+    #define GPS_RX_PIN              3   // RX0 (alternative pin)
+    #define GPS_TX_PIN              1   // TX0 (alternative pin)
+    #define GPS_UART_NUM            1   // Serial1 for ESP32
     #define GPS_BAUD_RATE           9600
     
-    #define I2C_SDA_PIN             21
-    #define I2C_SCL_PIN             22
-    #define I2C_SPEED               400000
+    // I2C - Accéléromètre MPU-6050 + Wattmètre INA219
+    #define I2C_SDA_PIN             8   // GPIO8 (SDA/D5 on Nano ESP32)
+    #define I2C_SCL_PIN             9   // GPIO9 (SCL/D6 on Nano ESP32)
+    #define I2C_SPEED               400000  // 400 kHz standard
     
-    #define LED_DATA_PIN            5   // GPIO5
-    #define LED_PWM_PIN             25  // GPIO25
+    // MPU-6050 I2C Address
+    #define MPU6050_I2C_ADDR        0x68    // Default address
     
-    #define BATTERY_SENSE_PIN       34  // ADC (read-only)
-    #define TEMPERATURE_PIN         35
+    // INA219 I2C Address (wattmètre)
+    #define INA219_I2C_ADDR         0x40    // Default address (A0=A1=GND)
     
-    #define BUTTON_PIN              0
-    #define STATUS_LED_PIN          2
+    // LED Control (GPIO11 = D7 on Nano ESP32)
+    #define LED_DATA_PIN            11  // D7 - WS2812B data line
+    #define LED_PWM_PIN             10  // D8 - PWM alternative
+    
+    // Analog sensors
+    #define BATTERY_SENSE_PIN       4   // GPIO4 (A0 analog)
+    #define TEMPERATURE_PIN         5   // GPIO5 (A1 analog)
+    
+    // Button & Status
+    #define BUTTON_PIN              7   // GPIO7 (D4)
+    #define STATUS_LED_PIN          6   // GPIO6 (D3)
 
 #endif // Platform selection
 
@@ -97,18 +109,33 @@
 // GPS CONFIGURATION
 // ============================================================================
 
-#define GPS_MODULE_TYPE         GPS_MODULE_UBLOX
+#define GPS_MODULE_TYPE         GPS_MODULE_BEITIAN_220T
 #define GPS_TIMEOUT_MS          2000
 #define GPS_READ_INTERVAL_MS    1000
 
+// Beitian 220T specifics
+#define GPS_BAUD_RATE_BEITIAN   9600
+#define GPS_SENTENCE_BUFFER_SIZE 256
+
 // ============================================================================
-// ACCELEROMETER CONFIGURATION
+// ACCELEROMETER CONFIGURATION (MPU-6050)
 // ============================================================================
 
-#define ACCELEROMETER_I2C_ADDR  0x68    // MPU-6050 default
+#define ACCELEROMETER_I2C_ADDR  0x68    // MPU-6050 default address
 #define ACCELEROMETER_SCALE     ACCEL_SCALE_2G
 #define ACCELEROMETER_SAMPLE_RATE 50    // Hz
 #define ACCELEROMETER_FILTER    KALMAN  // ou EXPONENTIAL
+#define MPU6050_DLPF_CFG        6       // Low Pass Filter config (0-6)
+
+// ============================================================================
+// WATTMETER CONFIGURATION (INA219)
+// ============================================================================
+
+#define POWER_MONITOR_ENABLED   1
+#define INA219_I2C_ADDR         0x40    // Default address
+#define INA219_SHUNT_OHMS       0.1f    // 100 mOhm shunt resistor
+#define INA219_MAX_AMPS         3.2f    // Max current: 3.2A
+#define INA219_UPDATE_INTERVAL  1000    // ms
 
 // ============================================================================
 // LED CONFIGURATION
