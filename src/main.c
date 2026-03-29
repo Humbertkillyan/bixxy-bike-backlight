@@ -14,6 +14,7 @@
 #include "utils/utils.h"
 #include "gps/gps.h"
 #include "accelerometer/accelerometer.h"
+#include "power/power.h"
 #include "leds/leds.h"
 #include "sensors/sensors.h"
 #include "cloud/cloud.h"
@@ -84,15 +85,15 @@ bool system_init(void) {
     
     Serial.println("[MAIN] Initializing modules...");
     
-    // Initialiser GPS
-    Serial.print("[MAIN] Init GPS... ");
-    if (!gps_init()) {
+    // Initialiser Power Monitor en premier (INA219)
+    Serial.print("[MAIN] Init Power Monitor... ");
+    if (!power_init()) {
         Serial.println("FAILED");
         return false;
     }
     Serial.println("OK");
     
-    // Initialiser Accéléromètre
+    // Initialiser Accéléromètre (MPU-6050)
     Serial.print("[MAIN] Init Accelerometer... ");
     if (!accelerometer_init()) {
         Serial.println("FAILED");
@@ -108,6 +109,14 @@ bool system_init(void) {
     } else {
         Serial.println("OK");
     }
+    
+    // Initialiser GPS (Beitian 220T)
+    Serial.print("[MAIN] Init GPS... ");
+    if (!gps_init()) {
+        Serial.println("FAILED");
+        return false;
+    }
+    Serial.println("OK");
     
     // Initialiser LEDs
     Serial.print("[MAIN] Init LEDs... ");
